@@ -22,6 +22,21 @@ delimiter, no quoting, fixed schema. In exchange it is several times faster
 than the general-purpose readers on numeric data and uses a fraction of the
 memory. See [the contract](#the-csv-contract) and [benchmarks](#benchmarks).
 
+## Contents
+
+- [Install](#install)
+- [API at a glance](#api-at-a-glance)
+- [Reading](#reading): [matrices](#matrices-numpy--torch), [columns](#columns-dict--pandas--arrow--polars), [foreign files](#files-you-did-not-write), [options](#options)
+- [Writing](#writing)
+- [What is actually zero-copy](#what-is-actually-zero-copy)
+- [The CSV contract](#the-csv-contract)
+- [The sidecar](#the-sidecar)
+- [How it works](#how-it-works)
+- [Benchmarks](#benchmarks)
+- [Development](#development)
+- [Repository layout](#repository-layout)
+- [Limitations and roadmap](#limitations-and-roadmap)
+
 ## Install
 
 Requirements: Python 3.10+, a C++20 compiler (GCC 11+, Clang 13+, MSVC 2022).
@@ -47,6 +62,50 @@ Check what the build enabled:
 {'cpp_extension': True, 'fast_float': True, 'simd_scanner': True, 'simd_runtime': 'avx2',
  'direct_buffers': True, 'sidecar_version': 7, 'version': '1.0.0'}
 ```
+
+## API at a glance
+
+| function | what it does |
+|---|---|
+| `read_csv(path, schema=None, *, output="numpy", dtype=None, out=None, device=None, pin_memory=False, has_header=None, delimiter=None, threads=0, strings="python", empty_float_is_nan=True, validate_metadata=True, return_stats=False)` | Parse a strict CSV into the requested container. Default: one row-major NumPy matrix. |
+| `read_numpy(path, dtype=None, **kw)` | `read_csv(..., output="numpy")`: returns `np.ndarray` of shape `(rows, cols)`. |
+| `read_torch(path, dtype=None, device=None, pin_memory=False, **kw)` | `read_csv(..., output="torch")`: returns a contiguous `torch.Tensor`, optionally on a device. |
+| `write_csv(data, path, *, schema=None, columns=None, header=True, delimiter=",", metadata=True, threads=0, chunk_rows=0, target_chunk_bytes=4 MiB, float_precision=None)` | Write canonical CSV plus sidecar from a matrix, mapping, DataFrame or Arrow table. Returns the `Path`. |
+| `inspect_csv(path, schema, *, has_header=True, delimiter=",", threads=0)` | Row count, per-column string bytes and a chunk plan for a sidecar-free file, computed in parallel. |
+| `plan_read(path, schema=None, *, has_header=None, delimiter=None, threads=0)` | The resolved `ReadPlan` (schema, header, delimiter, rows, chunks) that `read_csv` would use. |
+| `load_metadata(path)` | The `<path>.fcsv.json` sidecar as a dict. |
+| `normalize_schema(schema)` | Canonical `[(name, dtype), ...]` from a mapping or pair list, resolving NumPy/torch dtypes and aliases. |
+| `build_info()` | Which accelerations the installed extension has (fast_float, SIMD level, sidecar version). |
+
+Supported column dtypes and what they become:
+
+| schema dtype | aliases accepted | NumPy | torch | notes |
+|---|---|---|---|---|
+| `int64` | `int`, `i8`, `np.int64`, `torch.int64` | `int64` | `torch.int64` | |
+| `int32` | `i4`, `np.int32`, `torch.int32`, narrower ints | `int32` | `torch.int32` | `int8/16`, `uint8/16`, `bool` widen to this |
+| `float64` | `float`, `f8`, `double` | `float64` | `torch.float64` | empty cell parses as NaN |
+| `float32` | `f4`, `single`, `float16` | `float32` | `torch.float32` | empty cell parses as NaN |
+| `string` | `str`, `text`, `object` | object array / packed buffers | list of `str` | packed as `uint64` offsets + UTF-8 arena |
+| `skip` | `None`, `drop` | not returned | not returned | field is scanned past, no allocation |
+
+The output containers:
+
+| `output=` | returns | strings | copies |
+|---|---|---|---|
+| `"numpy"` (default) | 2-D `np.ndarray` | not allowed (use `skip`) | none |
+| `"torch"` | 2-D `torch.Tensor` | not allowed (use `skip`) | none on CPU, one H2D copy on CUDA |
+| `"dict"` | `{name: 1-D ndarray}` | object arrays of `str` | none for numbers |
+| `"torch_dict"` | `{name: 1-D tensor}` | `list[str]` | none for numbers |
+| `"packed"` | `{name: ndarray | {"offsets", "data"}}` | raw packed buffers | none |
+| `"pandas"` | `pd.DataFrame` | pandas string dtype | pandas may copy strings |
+| `"pandas_arrow"` | `pd.DataFrame` with `ArrowDtype` columns | Arrow `large_string` | none |
+| `"arrow"` | `pyarrow.Table` | `large_string` | none |
+| `"polars"` | `pl.DataFrame` | `str` | none |
+
+Accepted `write_csv` inputs: 2-D or 1-D `np.ndarray`, 2-D or 1-D `torch.Tensor`
+(CPU or CUDA; CUDA is copied to host first), `{name: column}` mappings whose
+values are arrays, tensors, lists, pandas Series or Arrow arrays,
+`pandas.DataFrame`, `polars.DataFrame`, `pyarrow.Table`.
 
 ## Reading
 
