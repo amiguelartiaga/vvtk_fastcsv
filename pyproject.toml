@@ -1,0 +1,63 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "vvtk-fastcsv"
+dynamic = ["version"]
+description = "Fast strict CSV reader/writer that parses straight into NumPy arrays and torch tensors"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Antonio Miguel" }]
+keywords = ["csv", "numpy", "torch", "pytorch", "parser", "simd", "zero-copy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+torch = ["torch>=2.0"]
+pandas = ["pandas>=2.0"]
+arrow = ["pyarrow>=15"]
+polars = ["polars>=1.0"]
+dev = ["pytest>=8", "psutil>=5.9", "pandas>=2.0", "pyarrow>=15"]
+all = ["torch>=2.0", "pandas>=2.0", "pyarrow>=15", "polars>=1.0", "pytest>=8", "psutil>=5.9"]
+
+[project.urls]
+Homepage = "https://github.com/amiguelartiaga/vvtk_fastcsv"
+Issues = "https://github.com/amiguelartiaga/vvtk_fastcsv/issues"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.18"
+cmake.build-type = "Release"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/vvtk_fastcsv"]
+sdist.include = ["third_party/**", "cpp/**", "tests/**", "benchmarks/**", "examples/**"]
+sdist.exclude = ["build/**", ".venv/**"]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "src/vvtk_fastcsv/_version.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "*-musllinux_i686 *-win32 *-manylinux_i686"
+test-requires = ["pytest", "pandas"]
+test-command = "pytest -q {project}/tests"

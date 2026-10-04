@@ -1,0 +1,11 @@
+.venv/
+build/
+dist/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+*.so
+*.pyd
+*.csv
+*.fcsv.json
+.fastcsv_*_smoke.csv

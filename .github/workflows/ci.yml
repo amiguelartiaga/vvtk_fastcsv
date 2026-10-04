@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  core:
+    name: C++ core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build/core -DFASTCSV_BUILD_PYTHON=OFF -DFASTCSV_BUILD_CORE_TESTS=ON -DFASTCSV_ENABLE_IPO=OFF -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/core --config Release -j
+      - name: Test
+        run: ctest --test-dir build/core -C Release --output-on-failure
+      - name: Scalar scanner build (no SIMD)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S . -B build/scalar -DFASTCSV_BUILD_PYTHON=OFF -DFASTCSV_BUILD_CORE_TESTS=ON -DFASTCSV_ENABLE_SIMD=OFF -DFASTCSV_USE_FAST_FLOAT=OFF -DFASTCSV_ENABLE_IPO=OFF
+          cmake --build build/scalar -j
+          ctest --test-dir build/scalar --output-on-failure
+
+  python:
+    name: Python ${{ matrix.python }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install (with torch on Linux only, CPU wheels)
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install '.[dev]' polars
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          fi
+      - name: Test
+        run: python -m pytest -q tests
+      - name: Benchmark smoke
+        if: runner.os == 'Linux' && matrix.python == '3.12'
+        run: python benchmarks/benchmark.py --scale 0.02 --repeats 1
