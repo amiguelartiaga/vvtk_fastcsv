@@ -317,53 +317,61 @@ def section_threads(comp: Competitors, root: Path, scale: float, repeats: int, t
     mib = path.stat().st_size / 2**20
     out = [f"### Thread scaling ({label}, {rows:,} rows, {mib:.0f} MiB)\n",
            "Seconds, median. The sidecar plan has 4 MiB chunks; the sidecar-free read includes its "
-           "parallel inspection pass. Polars shown for reference at the same thread count via "
-           "`POLARS_MAX_THREADS` (set at import, so it is only varied when polars is imported fresh).\n"]
+           "parallel inspection pass.\n"]
     rows_out = []
     for th in threads_list:
         t_read = timed(lambda: fc.read_csv(path, threads=th), repeats)
         t_nosc = timed(lambda: fc.read_csv(nosidecar, threads=th), repeats)
         t_write = timed(lambda: fc.write_csv(data, root / "w_threads.csv", threads=th), repeats)
-        t_pl = None
-        if comp.pl is not None:
-            script = (f"import time,polars as pl; pl.read_csv({str(path)!r}); t0=time.perf_counter(); "
-                      f"pl.read_csv({str(path)!r}).to_numpy(); print(time.perf_counter()-t0)")
-            env = dict(os.environ, POLARS_MAX_THREADS=str(th))
-            samples = []
-            for _ in range(max(1, min(repeats, 3))):
-                res = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
-                if res.returncode == 0:
-                    samples.append(float(res.stdout.strip()))
-            t_pl = statistics.median(samples) if samples else None
-        rows_out.append([th, fmt(t_read), speed(mib, t_read), fmt(t_nosc), fmt(t_write), fmt(t_pl)])
-    out.append(md_table(["threads", "read (sidecar)", "MiB/s", "read (no sidecar)", "write", "polars read"], rows_out))
+        rows_out.append([th, fmt(t_read), speed(mib, t_read), fmt(t_nosc), fmt(t_write)])
+    out.append(md_table(["threads", "read (sidecar)", "MiB/s", "read (no sidecar)", "write"], rows_out))
     return "\n".join(out)
 
 
 MEMORY_SCRIPT = r'''
 import resource, sys
-path, lib = sys.argv[1], sys.argv[2]
+path, lib, mode = sys.argv[1], sys.argv[2], sys.argv[3]
 def rss():
+    # VmHWM is this process's own peak; ru_maxrss would inherit the parent's RSS at fork time.
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        pass
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 import numpy as np
-if lib == "baseline":
-    pass
-elif lib == "fastcsv numpy":
-    import vvtk_fastcsv as fc; x = fc.read_csv(path)
+if lib.startswith("fastcsv"):
+    import vvtk_fastcsv as fc
+    if "torch" in lib:
+        import torch
+elif lib.startswith("pandas"):
+    import pandas as pd
+elif lib.startswith("pyarrow"):
+    import pyarrow.csv as pacsv
+elif lib.startswith("polars"):
+    import polars as pl
+elif lib.startswith("duckdb"):
+    import duckdb
+if mode == "import":
+    print(rss()); sys.exit(0)
+if lib == "fastcsv numpy":
+    x = fc.read_csv(path)
 elif lib == "fastcsv torch":
-    import vvtk_fastcsv as fc; x = fc.read_csv(path, output="torch")
+    x = fc.read_csv(path, output="torch")
 elif lib == "np.loadtxt":
     x = np.loadtxt(path, delimiter=",", skiprows=1)
 elif lib == "pandas (C) .to_numpy()":
-    import pandas as pd; x = pd.read_csv(path).to_numpy()
+    x = pd.read_csv(path).to_numpy()
 elif lib == "pandas (pyarrow) .to_numpy()":
-    import pandas as pd; x = pd.read_csv(path, engine="pyarrow").to_numpy()
+    x = pd.read_csv(path, engine="pyarrow").to_numpy()
 elif lib == "pyarrow.csv -> numpy":
-    import pyarrow.csv as pacsv; t = pacsv.read_csv(path); x = np.column_stack([c.to_numpy() for c in t.columns])
+    t = pacsv.read_csv(path); x = np.column_stack([c.to_numpy() for c in t.columns])
 elif lib == "polars .to_numpy()":
-    import polars as pl; x = pl.read_csv(path).to_numpy()
+    x = pl.read_csv(path).to_numpy()
 elif lib == "duckdb .fetchnumpy()":
-    import duckdb; x = np.column_stack(list(duckdb.sql(f"SELECT * FROM read_csv('{path}')").fetchnumpy().values()))
+    x = np.column_stack(list(duckdb.sql(f"SELECT * FROM read_csv('{path}')").fetchnumpy().values()))
 print(rss())
 '''
 
@@ -374,9 +382,9 @@ def section_memory(comp: Competitors, root: Path, scale: float, threads: int):
     matrix, columns, data, path, nosidecar = write_case_files(root, "memory", rows, cols, kind, threads)
     mib = path.stat().st_size / 2**20
     result_mib = matrix.nbytes / 2**20
-    libs = ["baseline", "fastcsv numpy", "np.loadtxt"]
+    libs = ["fastcsv numpy", "np.loadtxt"]
     if comp.torch is not None:
-        libs.insert(2, "fastcsv torch")
+        libs.insert(1, "fastcsv torch")
     if comp.pd is not None:
         libs.append("pandas (C) .to_numpy()")
         if comp.pacsv is not None:
@@ -387,17 +395,23 @@ def section_memory(comp: Competitors, root: Path, scale: float, threads: int):
         libs.append("polars .to_numpy()")
     if comp.duckdb is not None:
         libs.append("duckdb .fetchnumpy()")
-    peaks = {}
+
+    def peak(lib: str, mode: str):
+        res = subprocess.run([sys.executable, "-c", MEMORY_SCRIPT, str(path), lib, mode], capture_output=True, text=True)
+        return float(res.stdout.strip()) if res.returncode == 0 and res.stdout.strip() else None
+
+    rows_out = []
     for lib in libs:
-        res = subprocess.run([sys.executable, "-c", MEMORY_SCRIPT, str(path), lib], capture_output=True, text=True)
-        peaks[lib] = float(res.stdout.strip()) if res.returncode == 0 and res.stdout.strip() else None
-    base = peaks.pop("baseline") or 0.0
+        imp, read = peak(lib, "import"), peak(lib, "read")
+        delta = None if imp is None or read is None else read - imp
+        rows_out.append([lib, "-" if imp is None else f"{imp:,.0f}", "-" if delta is None else f"{delta:,.0f}",
+                         "-" if delta is None else f"{delta / result_mib:.1f}"])
     out = [f"### Peak memory ({label}, {rows:,} rows, {mib:.0f} MiB CSV, {result_mib:.0f} MiB result)\n",
-           "Peak resident set size of a fresh process minus a baseline that only imports NumPy, in MiB. "
-           "Includes each library's own import footprint.\n"]
-    out.append(md_table(["reader", "peak RSS above baseline (MiB)", "x result size"],
-                        [[lib, "-" if p is None else f"{p - base:,.0f}", "-" if p is None else f"{(p - base) / result_mib:.1f}"]
-                         for lib, p in peaks.items()]))
+           "Peak resident set size (VmHWM) of a fresh process, in MiB: the library's import footprint, and "
+           "the additional peak while reading. vvtk_fastcsv memory-maps the input, so its read peak "
+           f"includes up to {mib:.0f} MiB of file pages that are page cache, not allocations; its private "
+           f"allocation is the {result_mib:.0f} MiB result.\n"]
+    out.append(md_table(["reader", "import (MiB)", "read peak above import (MiB)", "x result size"], rows_out))
     return "\n".join(out)
 
 

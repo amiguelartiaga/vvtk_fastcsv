@@ -268,47 +268,109 @@ The GIL is released for the whole parse and write.
 
 ## Benchmarks
 
-Linux, 16-core desktop, tmpfs, Python 3.14, NumPy 2.5, pandas 3.0, PyArrow 25, polars 1.x,
-warm page cache, median of 3 runs (`python benchmarks/benchmark.py --scale 0.5 --repeats 3`).
-Times in seconds.
+Measured on a 13th Gen Intel i7-1360P laptop (16 logical CPUs, 4P+8E), Linux,
+Python 3.14, NumPy 2.5, pandas 3.0, PyArrow 25, polars 1.44, DuckDB 1.5,
+torch 2.14 (CPU). Warm page cache, tmpfs, median of 3 runs. vvtk_fastcsv uses
+all 16 threads; competitors run with their own defaults (also all cores).
+Full output with throughput tables: [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
 
-**Read** (fastcsv parses into the final NumPy array / torch tensor; the others
-build their own containers)
+### Read: numeric matrices to a NumPy array
 
-| case | shape | MiB | fastcsv numpy | fastcsv torch | np.loadtxt | pandas | pyarrow | polars |
-|---|---|---|---|---|---|---|---|---|
-| float64 matrix | 1,000,000 x 4 | 74 | **0.014** | 0.013 | 0.587 | 0.261 | 0.022 | 0.013 |
-| float32 matrix | 1,000,000 x 4 | 41 | **0.010** | 0.010 | 0.184 | 0.195 | 0.015 | 0.012 |
-| wide float64 | 50,000 x 64 | 59 | **0.009** | 0.010 | 0.447 | 0.220 | 0.021 | 0.013 |
-| int64 matrix | 1,000,000 x 6 | 59 | **0.014** | 0.014 | 0.202 | 0.381 | 0.023 | 0.016 |
+Seconds, median. Competitor times include their conversion to a 2-D NumPy array.
 
-| case (strings) | shape | MiB | fastcsv packed | fastcsv dict | fastcsv pandas | pandas | pyarrow | polars |
-|---|---|---|---|---|---|---|---|---|
-| int/float/string | 500,000 x 6 | 35 | **0.007** | 0.036 | 0.079 | 0.207 | 0.016 | 0.009 |
-| string heavy | 250,000 x 6 | 16 | **0.005** | 0.048 | 0.109 | 0.160 | 0.007 | 0.005 |
+| case | shape | MiB | fastcsv numpy | fastcsv numpy (no sidecar) | fastcsv torch | np.loadtxt | pandas (C) .to_numpy() | pandas (pyarrow) .to_numpy() | pyarrow.csv -> numpy | polars .to_numpy() | duckdb .fetchnumpy() |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| float64, 2 columns | 2,000,000 x 2 | 74 | 0.010 | 0.013 | 0.010 | 0.620 | 0.277 | 0.027 | 0.033 | 0.015 | 0.080 |
+| float64, 8 columns | 1,000,000 x 8 | 147 | 0.020 | 0.028 | 0.019 | 1.159 | 0.536 | 0.049 | 0.087 | 0.032 | 0.193 |
+| float64, 128 columns | 50,000 x 128 | 118 | 0.017 | 0.033 | 0.018 | 0.945 | 0.457 | 0.058 | 0.119 | 0.042 | 1.294 |
+| float32, 8 columns | 1,000,000 x 8 | 81 | 0.021 | 0.024 | 0.022 | 0.417 | 0.435 | 0.038 | 0.078 | 0.032 | 0.189 |
+| int64, 8 columns | 1,000,000 x 8 | 102 | 0.020 | 0.022 | 0.023 | 0.297 | 0.654 | 0.046 | 0.084 | 0.027 | 0.183 |
+| int32, 8 columns | 1,000,000 x 8 | 79 | 0.019 | 0.020 | 0.019 | 0.266 | 0.526 | 0.037 | 0.074 | 0.027 | 0.180 |
+| int64 / float32 / float64, 9 columns | 1,000,000 x 9 | 115 | 0.024 | 0.027 | 0.024 | 0.786 | 0.564 | 0.060 | 0.096 | 0.038 | 0.209 |
 
-`packed` is the parser's own output (offsets + UTF-8 arena, what Arrow/polars
-outputs wrap for free); `dict` is the cost of creating one Python `str` per
-cell, which no parser can avoid when you ask for Python strings.
+Across these numeric cases vvtk_fastcsv is 1.3 to 2.5x faster than polars,
+2.5 to 7x faster than PyArrow and pandas' pyarrow engine, 20 to 30x faster
+than pandas' default engine and 15 to 60x faster than `np.loadtxt`, while
+handing back the final NumPy array or torch tensor rather than a DataFrame.
+The sidecar-free path (one extra parallel inspection pass) stays within 1.5x
+of the sidecar path.
 
-**Write** (fastcsv time includes the sidecar)
+### Read: tables with string columns, native containers
 
-| case | MiB | fastcsv | np.savetxt | pandas | polars |
-|---|---|---|---|---|---|
-| float64 matrix | 74 | 0.028 | 1.702 | 3.370 | 0.020 |
-| float32 matrix | 41 | 0.020 | 1.676 | 2.186 | 0.015 |
-| wide float64 | 59 | 0.026 | 0.905 | 2.753 | 0.034 |
-| int64 matrix | 59 | 0.025 | 1.288 | 1.010 | 0.017 |
-| int/float/string | 35 | 0.040 | - | 1.084 | 0.012 |
-| string heavy | 16 | 0.047 | - | 0.218 | 0.008 |
+Seconds, median. `fastcsv packed` is the parser's own storage (uint64 offsets + UTF-8 arena); `fastcsv dict` additionally creates one Python `str` per cell; `fastcsv arrow` wraps the packed buffers as `large_string` without copying.
 
-Writes are bound by the single ordered write stream on this machine (a raw
-74 MiB `write()` takes 18 ms on the same tmpfs); the string cases also pay
-for packing Python `str` objects into UTF-8 before formatting. polars is
-the one to beat there.
+| case | shape | MiB | fastcsv packed | fastcsv dict (Python str) | fastcsv arrow | fastcsv pandas | pandas (C) | pandas (pyarrow) | pyarrow.csv | polars | duckdb .arrow() |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| int64 / float64 / string, 6 columns | 1,000,000 x 6 | 71 | 0.012 | 0.087 | 0.012 | 0.174 | 0.441 | 0.033 | 0.025 | 0.018 | 0.060 |
+| short strings (10 B), 6 columns | 500,000 x 6 | 31 | 0.007 | 0.105 | 0.008 | 0.242 | 0.353 | 0.018 | 0.013 | 0.007 | 0.052 |
+| long strings (45 B), 4 columns | 250,000 x 4 | 40 | 0.005 | 0.047 | 0.005 | 0.093 | 0.203 | 0.015 | 0.012 | 0.009 | 0.060 |
 
-Run your own: `python benchmarks/benchmark.py --scale 0.1 --repeats 3`
-(`--no-sidecar` benchmarks the foreign-file path, `--threads N` limits workers).
+### Write
+
+Seconds, median. fastcsv time includes writing the sidecar. Floats are written with shortest round-trip text by every library except np.savetxt (`%.17g`).
+
+| case | shape | MiB | fastcsv | np.savetxt | pandas .to_csv() | pyarrow.csv.write_csv | polars .write_csv() |
+|---|---|---|---|---|---|---|---|
+| float64, 2 columns | 2,000,000 x 2 | 74 | 0.027 | 2.417 | 3.805 | 0.307 | 0.026 |
+| float64, 8 columns | 1,000,000 x 8 | 147 | 0.075 | 2.945 | 7.162 | 0.593 | 0.048 |
+| float64, 128 columns | 50,000 x 128 | 118 | 0.067 | 1.794 | 5.684 | 0.462 | 0.055 |
+| float32, 8 columns | 1,000,000 x 8 | 81 | 0.063 | 2.903 | 4.405 | 0.538 | 0.031 |
+| int64, 8 columns | 1,000,000 x 8 | 102 | 0.045 | 1.525 | 1.515 | 0.222 | 0.029 |
+| int32, 8 columns | 1,000,000 x 8 | 79 | 0.040 | 1.515 | 1.296 | 0.204 | 0.023 |
+| int64 / float32 / float64, 9 columns | 1,000,000 x 9 | 115 | 0.049 | - | 4.767 | 0.481 | 0.036 |
+| int64 / float64 / string, 6 columns | 1,000,000 x 6 | 71 | 0.083 | - | 2.298 | 0.201 | 0.022 |
+| short strings (10 B), 6 columns | 500,000 x 6 | 31 | 0.092 | - | 0.413 | 0.021 | 0.012 |
+| long strings (45 B), 4 columns | 250,000 x 4 | 40 | 0.042 | - | 0.459 | 0.015 | 0.017 |
+
+Writes are bound by the single ordered write stream on this machine; polars
+is about 1.5x faster on numeric data and clearly faster on string-heavy data,
+where vvtk_fastcsv also packs the Python strings into UTF-8 first.
+
+### Read: size scaling (float64, 8 columns)
+
+Seconds, median; warm page cache. Same readers as above.
+
+| shape | MiB | fastcsv numpy | fastcsv numpy (no sidecar) | fastcsv torch | np.loadtxt | pandas (C) .to_numpy() | pandas (pyarrow) .to_numpy() | pyarrow.csv -> numpy | polars .to_numpy() | duckdb .fetchnumpy() |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 100,000 x 8 | 15 | 0.003 | 0.005 | 0.004 | 0.135 | 0.058 | 0.009 | 0.009 | 0.004 | 0.113 |
+| 1,000,000 x 8 | 147 | 0.022 | 0.033 | 0.023 | 1.262 | 0.569 | 0.051 | 0.091 | 0.034 | 0.204 |
+| 5,000,000 x 8 | 735 | 0.098 | 0.135 | 0.103 | 6.226 | 2.814 | 0.359 | 0.577 | 0.181 | 0.827 |
+
+### Thread scaling (float64, 8 columns, 1,000,000 rows, 147 MiB)
+
+Seconds, median. The sidecar plan has 4 MiB chunks; the sidecar-free read includes its parallel inspection pass.
+
+| threads | read (sidecar) | MiB/s | read (no sidecar) | write |
+|---|---|---|---|---|
+| 1 | 0.135 | 1,085 | 0.141 | 0.335 |
+| 2 | 0.073 | 2,013 | 0.082 | 0.204 |
+| 4 | 0.040 | 3,669 | 0.051 | 0.135 |
+| 8 | 0.027 | 5,504 | 0.037 | 0.102 |
+| 16 | 0.021 | 7,051 | 0.031 | 0.064 |
+
+### Peak memory (float64, 8 columns, 1,000,000 rows, 147 MiB CSV, 61 MiB result)
+
+Peak resident set size (VmHWM) of a fresh process, in MiB: the library's import footprint, and the additional peak while reading. vvtk_fastcsv memory-maps the input, so its read peak includes up to 147 MiB of file pages that are page cache, not allocations; its private allocation is the 61 MiB result.
+
+| reader | import (MiB) | read peak above import (MiB) | x result size |
+|---|---|---|---|
+| fastcsv numpy | 33 | 208 | 3.4 |
+| fastcsv torch | 259 | 211 | 3.5 |
+| np.loadtxt | 31 | 64 | 1.1 |
+| pandas (C) .to_numpy() | 133 | 129 | 2.1 |
+| pandas (pyarrow) .to_numpy() | 133 | 397 | 6.5 |
+| pyarrow.csv -> numpy | 78 | 503 | 8.2 |
+| polars .to_numpy() | 72 | 318 | 5.2 |
+| duckdb .fetchnumpy() | 78 | 415 | 6.8 |
+
+Run your own:
+
+```bash
+python benchmarks/benchmark.py --quick                       # ~1 minute smoke run
+python benchmarks/benchmark.py --out benchmarks/RESULTS.md   # everything, ~5 minutes
+python benchmarks/benchmark.py --section read --cases f64_tall,strings_short --threads 8
+python benchmarks/benchmark.py --skip duckdb,torch           # drop competitors
+```
 
 ## Development
 
