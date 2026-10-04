@@ -7,7 +7,8 @@ import vvtk_fastcsv as fc
 
 def test_infers_schema_and_header(tmp_path):
     p = tmp_path / "f.csv"
-    p.write_text("a,b,c\r\n1,2.5,x\r\n2,,y\r\n3,-1e3,zz", encoding="utf-8")
+    # Bytes, not text mode: on Windows write_text would turn \r\n into \r\r\n.
+    p.write_bytes(b"a,b,c\r\n1,2.5,x\r\n2,,y\r\n3,-1e3,zz")
     d, stats = fc.read_csv(p, output="dict", return_stats=True)
     assert stats["schema"] == [("a", "int64"), ("b", "float64"), ("c", "string")]
     assert stats["has_header"] is True

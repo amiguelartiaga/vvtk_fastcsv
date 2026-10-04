@@ -3,12 +3,11 @@ from pathlib import Path
 
 import vvtk_fastcsv as fc
 
-Path("iris_like.csv").write_text(
-    "sepal_length,sepal_width,petal_length,species\r\n"
-    "5.1,3.5,1.4,setosa\r\n"
-    "4.9,,1.4,setosa\r\n"
-    "6.3,3.3,6.0,virginica\r\n",
-    encoding="utf-8",
+Path("iris_like.csv").write_bytes(
+    b"sepal_length,sepal_width,petal_length,species\r\n"
+    b"5.1,3.5,1.4,setosa\r\n"
+    b"4.9,,1.4,setosa\r\n"
+    b"6.3,3.3,6.0,virginica\r\n"
 )
 
 # Everything inferred: header, int/float/string columns. Strings come back as object arrays.
